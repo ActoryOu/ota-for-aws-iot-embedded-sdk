@@ -66,6 +66,8 @@
 #define MQTT_API_STREAMS                      "/streams/"             /*!< Stream API identifier. */
 #define MQTT_API_DATA_CBOR                    "/data/cbor"            /*!< Stream API suffix. */
 #define MQTT_API_GET_CBOR                     "/get/cbor"             /*!< Stream API suffix. */
+#define MQTT_API_UPDATE_ACCEPTED              "/update/accepted"      /*!< Stream API suffix. */
+#define MQTT_API_UPDATE_REJECTED              "/update/rejected"      /*!< Stream API suffix. */
 
 /* NOTE: The format specifiers in this string are placeholders only; the lengths of these
  * strings are used to calculate buffer sizes.
@@ -75,9 +77,13 @@ static const char pOtaJobsNotifyNextTopicTemplate[] = MQTT_API_THINGS "%s"MQTT_A
 static const char pOtaJobStatusTopicTemplate[] = MQTT_API_THINGS "%s"MQTT_API_JOBS "%s"MQTT_API_UPDATE;        /*!< Topic template to update the current job. */
 static const char pOtaStreamDataTopicTemplate[] = MQTT_API_THINGS "%s"MQTT_API_STREAMS "%s"MQTT_API_DATA_CBOR; /*!< Topic template to receive data over a stream. */
 static const char pOtaGetStreamTopicTemplate[] = MQTT_API_THINGS "%s"MQTT_API_STREAMS "%s"MQTT_API_GET_CBOR;   /*!< Topic template to request next data over a stream. */
+static const char pOtaJobsUpdateRespAcceptedTopicTemplate[] = MQTT_API_THINGS "%s"MQTT_API_JOBS "%s"MQTT_API_UPDATE_ACCEPTED;   /*!< Topic template to update/accept. */
+static const char pOtaJobsUpdateRespRejectedTopicTemplate[] = MQTT_API_THINGS "%s"MQTT_API_JOBS "%s"MQTT_API_UPDATE_REJECTED;   /*!< Topic template to update/accept. */
 
 static const char pOtaGetNextJobMsgTemplate[] = "{\"clientToken\":\"%u:%s\"}";                                 /*!< Used to specify client token id to authenticate job. */
 static const char pOtaStringReceive[] = "\"receive\"";                                                         /*!< Used to build the job receive template. */
+
+static char pOtaJobsActiveName[ OTA_JOB_ID_MAX_SIZE ];                                                         /*!< Used to store active job name for sub/unsub update response topics. */
 
 /** We map all of the above status cases to one of these status strings.
  * These are the only strings that are supported by the Job Service. You
@@ -139,6 +145,8 @@ static const char asciiDigits[] =
 #define TOPIC_STREAM_DATA_BUFFER_SIZE    ( TOPIC_PLUS_THINGNAME_LEN( pOtaStreamDataTopicTemplate ) + STREAM_NAME_MAX_LEN )                                                              /*!< Max buffer size for `streams/<stream_name>/data/cbor` topic. */
 #define TOPIC_GET_STREAM_BUFFER_SIZE     ( TOPIC_PLUS_THINGNAME_LEN( pOtaGetStreamTopicTemplate ) + STREAM_NAME_MAX_LEN )                                                               /*!< Max buffer size for `streams/<stream_name>/get/cbor` topic. */
 #define MSG_GET_NEXT_BUFFER_SIZE         ( CONST_STRLEN( "{\"clientToken\":\"" ) + CONST_STRLEN( ":" ) + CONST_STRLEN( "\"}" ) + OTA_CLIENT_TOKEN_MAX_THINGNAME_LEN + U32_MAX_LEN + 1 ) /*!< Max buffer size for message of `jobs/$next/get topic`. */
+#define TOPIC_JOB_UPDATE_ACCEPTED_BUFFER_SIZE     ( TOPIC_PLUS_THINGNAME_LEN( pOtaJobsUpdateRespAcceptedTopicTemplate ) + JOB_NAME_MAX_LEN )                                            /*!< Max buffer size for `jobs/<job_name>/update/accepted` topic. */
+#define TOPIC_JOB_UPDATE_REJECTED_BUFFER_SIZE     ( TOPIC_PLUS_THINGNAME_LEN( pOtaJobsUpdateRespRejectedTopicTemplate ) + JOB_NAME_MAX_LEN )                                            /*!< Max buffer size for `jobs/<job_name>/update/rejected` topic. */
 
 /**
  * @brief Subscribe to the jobs notification topic (i.e. New file version available).
@@ -351,6 +359,290 @@ static size_t stringBuilderUInt32Hex( char * pBuffer,
 
     pDest[ size ] = '\0';
     return size;
+}
+
+/*
+ * Subscribe to the OTA job update topics.
+ */
+static OtaMqttStatus_t subscribeToJobUpdateRespTopics( const OtaAgentContext_t * pAgentCtx )
+{
+    OtaMqttStatus_t mqttStatus = OtaMqttSuccess;
+
+    ( void ) memcpy( pOtaJobsActiveName, otaAgent.pActiveJobName, strlen( otaAgent.pActiveJobName ) );
+
+    mqttStatus = subscribeToJobUpdateRespAcceptedTopic( pAgentCtx );
+
+    if( mqttStatus == OtaMqttSuccess )
+    {
+        mqttStatus = subscribeToJobUpdateRespRejectedTopic( pAgentCtx );
+    }
+
+    return mqttStatus;
+}
+
+/*
+ * Subscribe to the OTA job update accepted topic.
+ */
+static OtaMqttStatus_t subscribeToJobUpdateRespAcceptedTopic( const OtaAgentContext_t * pAgentCtx )
+{
+    OtaMqttStatus_t mqttStatus = OtaMqttSuccess;
+
+    uint16_t topicLen = 0;
+
+    /* This buffer is used to store generated MQTT topics. The static size
+     * are calculated from the templates and the corresponding parameters. */
+    static char pJobTopicUpdateAcceptedResp[ TOPIC_JOB_UPDATE_ACCEPTED_BUFFER_SIZE ];
+
+    /* NULL-terminated list of topic string components */
+    const char * topicStringParts[] =
+    {
+        MQTT_API_THINGS,
+        NULL, /* Thing Name not available at compile time, initialized below. */
+        MQTT_API_JOBS,
+        NULL, /* Active Job Name not available at compile time, initialized below. */
+        MQTT_API_UPDATE_ACCEPTED,
+        NULL
+    };
+
+    assert( pAgentCtx != NULL );
+
+    /* Suppress warnings about unused variables. */
+    ( void ) pOtaJobsUpdateRespAcceptedTopicTemplate;
+
+    /* Build the dynamic job status topic . */
+    topicStringParts[ 1 ] = ( const char * ) pAgentCtx->pThingName;
+    topicStringParts[ 3 ] = ( const char * ) pAgentCtx->pActiveJobName;
+
+    topicLen = ( uint16_t ) stringBuilder(
+        pJobTopicUpdateAcceptedResp,
+        sizeof( pJobTopicUpdateAcceptedResp ),
+        topicStringParts );
+
+    /* The buffer is static and the size is calculated to fit. */
+    assert( ( topicLen > 0U ) && ( topicLen < sizeof( pJobTopicUpdateAcceptedResp ) ) );
+
+    mqttStatus = pAgentCtx->pOtaInterface->mqtt.subscribe( pJobTopicUpdateAcceptedResp,
+                                                           topicLen,
+                                                           1 );
+
+    if( mqttStatus == OtaMqttSuccess )
+    {
+        LogInfo( ( "Subscribed to MQTT topic: %s", pJobTopicUpdateAcceptedResp ) );
+    }
+    else
+    {
+        LogError( ( "Failed to subscribe to MQTT topic: "
+                    "subscribe returned error: "
+                    "OtaMqttStatus_t=%s"
+                    ", topic=%s",
+                    OTA_MQTT_strerror( mqttStatus ),
+                    pJobTopicUpdateAcceptedResp ) );
+    }
+
+    return mqttStatus;
+}
+
+/*
+ * Subscribe to the OTA job update rejected topic.
+ */
+static OtaMqttStatus_t subscribeToJobUpdateRespRejectedTopic( const OtaAgentContext_t * pAgentCtx )
+{
+    OtaMqttStatus_t mqttStatus = OtaMqttSuccess;
+
+    uint16_t topicLen = 0;
+
+    /* This buffer is used to store generated MQTT topics. The static size
+     * are calculated from the templates and the corresponding parameters. */
+    static char pJobTopicUpdateRejectResp[ TOPIC_JOB_UPDATE_REJECTED_BUFFER_SIZE ];
+
+    /* NULL-terminated list of topic string components */
+    const char * topicStringParts[] =
+    {
+        MQTT_API_THINGS,
+        NULL, /* Thing Name not available at compile time, initialized below. */
+        MQTT_API_JOBS,
+        NULL, /* Active Job Name not available at compile time, initialized below. */
+        MQTT_API_UPDATE_REJECTED,
+        NULL
+    };
+
+    assert( pAgentCtx != NULL );
+
+    /* Suppress warnings about unused variables. */
+    ( void ) pOtaJobsUpdateRespRejectedTopicTemplate;
+
+    /* Build the dynamic job status topic . */
+    topicStringParts[ 1 ] = ( const char * ) pAgentCtx->pThingName;
+    topicStringParts[ 3 ] = ( const char * ) pAgentCtx->pActiveJobName;
+
+    topicLen = ( uint16_t ) stringBuilder(
+        pJobTopicUpdateRejectResp,
+        sizeof( pJobTopicUpdateRejectResp ),
+        topicStringParts );
+
+    /* The buffer is static and the size is calculated to fit. */
+    assert( ( topicLen > 0U ) && ( topicLen < sizeof( pJobTopicUpdateRejectResp ) ) );
+
+    mqttStatus = pAgentCtx->pOtaInterface->mqtt.subscribe( pJobTopicUpdateRejectResp,
+                                                           topicLen,
+                                                           1 );
+
+    if( mqttStatus == OtaMqttSuccess )
+    {
+        LogInfo( ( "Subscribed to MQTT topic: %s", pJobTopicUpdateRejectResp ) );
+    }
+    else
+    {
+        LogError( ( "Failed to subscribe to MQTT topic: "
+                    "subscribe returned error: "
+                    "OtaMqttStatus_t=%s"
+                    ", topic=%s",
+                    OTA_MQTT_strerror( mqttStatus ),
+                    pJobTopicUpdateRejectResp ) );
+    }
+
+    return mqttStatus;
+}
+
+/*
+ * Unsubscribe to the OTA job update topics.
+ */
+static OtaMqttStatus_t unsubscribeToJobUpdateRespTopics( const OtaAgentContext_t * pAgentCtx )
+{
+    OtaMqttStatus_t mqttStatus = OtaMqttSuccess;
+
+    mqttStatus = unsubscribeToJobUpdateRespAcceptedTopic( pAgentCtx );
+
+    if( mqttStatus == OtaMqttSuccess )
+    {
+        mqttStatus = unsubscribeToJobUpdateRespRejectedTopic( pAgentCtx );
+    }
+
+    return mqttStatus;
+}
+
+/*
+ * Unsubscribe to the OTA job update accepted topic.
+ */
+static OtaMqttStatus_t unsubscribeToJobUpdateRespAcceptedTopic( const OtaAgentContext_t * pAgentCtx )
+{
+    OtaMqttStatus_t mqttStatus = OtaMqttSuccess;
+
+    uint16_t topicLen = 0;
+
+    /* This buffer is used to store generated MQTT topics. The static size
+     * are calculated from the templates and the corresponding parameters. */
+    static char pJobTopicUpdateAcceptedResp[ TOPIC_JOB_UPDATE_ACCEPTED_BUFFER_SIZE ];
+
+    /* NULL-terminated list of topic string components */
+    const char * topicStringParts[] =
+    {
+        MQTT_API_THINGS,
+        NULL, /* Thing Name not available at compile time, initialized below. */
+        MQTT_API_JOBS,
+        NULL, /* Active Job Name not available at compile time, initialized below. */
+        MQTT_API_UPDATE_ACCEPTED,
+        NULL
+    };
+
+    assert( pAgentCtx != NULL );
+
+    /* Suppress warnings about unused variables. */
+    ( void ) pOtaJobsUpdateRespAcceptedTopicTemplate;
+
+    /* Build the dynamic job status topic . */
+    topicStringParts[ 1 ] = ( const char * ) pAgentCtx->pThingName;
+    topicStringParts[ 3 ] = ( const char * ) pAgentCtx->pActiveJobName;
+
+    topicLen = ( uint16_t ) stringBuilder(
+        pJobTopicUpdateAcceptedResp,
+        sizeof( pJobTopicUpdateAcceptedResp ),
+        topicStringParts );
+
+    /* The buffer is static and the size is calculated to fit. */
+    assert( ( topicLen > 0U ) && ( topicLen < sizeof( pJobTopicUpdateAcceptedResp ) ) );
+
+    mqttStatus = pAgentCtx->pOtaInterface->mqtt.unsubscribe( pJobTopicUpdateAcceptedResp,
+                                                           topicLen,
+                                                           1 );
+
+    if( mqttStatus == OtaMqttSuccess )
+    {
+        LogInfo( ( "Unsubscribed to MQTT topic: %s", pJobTopicUpdateAcceptedResp ) );
+    }
+    else
+    {
+        LogError( ( "Failed to unsubscribe to MQTT topic: "
+                    "unsubscribe returned error: "
+                    "OtaMqttStatus_t=%s"
+                    ", topic=%s",
+                    OTA_MQTT_strerror( mqttStatus ),
+                    pJobTopicUpdateAcceptedResp ) );
+    }
+
+    return mqttStatus;
+}
+
+/*
+ * Unsubscribe to the OTA job update rejected topic.
+ */
+static OtaMqttStatus_t unsubscribeToJobUpdateRespRejectedTopic( const OtaAgentContext_t * pAgentCtx )
+{
+    OtaMqttStatus_t mqttStatus = OtaMqttSuccess;
+
+    uint16_t topicLen = 0;
+
+    /* This buffer is used to store generated MQTT topics. The static size
+     * are calculated from the templates and the corresponding parameters. */
+    static char pJobTopicUpdateRejectResp[ TOPIC_JOB_UPDATE_REJECTED_BUFFER_SIZE ];
+
+    /* NULL-terminated list of topic string components */
+    const char * topicStringParts[] =
+    {
+        MQTT_API_THINGS,
+        NULL, /* Thing Name not available at compile time, initialized below. */
+        MQTT_API_JOBS,
+        NULL, /* Active Job Name not available at compile time, initialized below. */
+        MQTT_API_UPDATE_REJECTED,
+        NULL
+    };
+
+    assert( pAgentCtx != NULL );
+
+    /* Suppress warnings about unused variables. */
+    ( void ) pOtaJobsUpdateRespRejectedTopicTemplate;
+
+    /* Build the dynamic job status topic . */
+    topicStringParts[ 1 ] = ( const char * ) pAgentCtx->pThingName;
+    topicStringParts[ 3 ] = ( const char * ) pAgentCtx->pActiveJobName;
+
+    topicLen = ( uint16_t ) stringBuilder(
+        pJobTopicUpdateRejectResp,
+        sizeof( pJobTopicUpdateRejectResp ),
+        topicStringParts );
+
+    /* The buffer is static and the size is calculated to fit. */
+    assert( ( topicLen > 0U ) && ( topicLen < sizeof( pJobTopicUpdateRejectResp ) ) );
+
+    mqttStatus = pAgentCtx->pOtaInterface->mqtt.unsubscribe( pJobTopicUpdateRejectResp,
+                                                           topicLen,
+                                                           1 );
+
+    if( mqttStatus == OtaMqttSuccess )
+    {
+        LogInfo( ( "Unsubscribed to MQTT topic: %s", pJobTopicUpdateRejectResp ) );
+    }
+    else
+    {
+        LogError( ( "Failed to unsubscribe to MQTT topic: "
+                    "unsubscribe returned error: "
+                    "OtaMqttStatus_t=%s"
+                    ", topic=%s",
+                    OTA_MQTT_strerror( mqttStatus ),
+                    pJobTopicUpdateRejectResp ) );
+    }
+
+    return mqttStatus;
 }
 
 /*
@@ -993,6 +1285,27 @@ OtaErr_t updateJobStatus_Mqtt( const OtaAgentContext_t * pAgentCtx,
         msgSize = prvBuildStatusMessageFinish( pMsg, sizeof( pMsg ), status, reason, subReason, pAgentCtx->fileContext.updaterVersion );
     }
 
+    if( strcmp( pAgentCtx->pActiveJobName, pOtaJobsActiveName ) != 0 )
+    {
+        /* pOtaJobsActiveName will be cleaned up by cleanupControl_Mqtt(). 
+         * So we only need to subscribe the update response topics here. */
+        mqttStatus = subscribeToJobUpdateRespTopics( pAgentCtx );
+
+        if( mqttStatus == OtaMqttSuccess )
+        {
+            LogDebug( ( "Subscribed update/accepted and update/rejected topics." ) );
+        }
+        else
+        {
+            LogError( ( "Failed to subscribe MQTT status message: "
+                        "subscribeToJobUpdateRespTopics returned error: "
+                        "OtaMqttStatus_t=%s",
+                        OTA_MQTT_strerror( mqttStatus ) ) );
+
+            result = OtaErrUpdateJobStatusFailed;
+        }
+    }
+
     if( msgSize > 0U )
     {
         /* Publish the string created above. */
@@ -1249,6 +1562,20 @@ OtaErr_t cleanupControl_Mqtt( const OtaAgentContext_t * pAgentCtx )
                        OTA_MQTT_strerror( mqttStatus ) ) );
             result = OtaErrCleanupControlFailed;
         }
+
+        /* Unsubscribe from job update response topics. */
+        mqttStatus = unsubscribeJobUpdateRespTopics( pAgentCtx );
+
+        if( mqttStatus != OtaMqttSuccess )
+        {
+            LogWarn( ( "Failed cleanup for MQTT control plane: "
+                    "unsubscribeJobUpdateRespTopics returned error: "
+                    "OtaMqttStatus_t=%s",
+                    OTA_MQTT_strerror( mqttStatus ) ) );
+            result = OtaErrCleanupControlFailed;
+        }
+
+        memset( pOtaJobsActiveName, 0, OTA_JOB_ID_MAX_SIZE );
     }
 
     return result;
